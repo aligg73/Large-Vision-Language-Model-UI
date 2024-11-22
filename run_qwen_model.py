@@ -9,12 +9,23 @@ import os
 model_path = os.environ.get("QWEN_MODEL_PATH", "path/to/model")
 
 def load_model(use_flash_attention=False):
+    # Get number of available GPUs
+    num_gpus = torch.cuda.device_count()
+    
+    if num_gpus <= 1:
+        device_map = "auto"
+    else:
+        # Create a device map that spreads across all available GPUs
+        device_map = "balanced_low_0"
+    
     model_kwargs = {
         "torch_dtype": torch.float16,  # Use float16 for AWQ compatibility
-        "device_map": "auto",
+        "device_map": device_map,
     }
+    
     if use_flash_attention:
         model_kwargs["attn_implementation"] = "flash_attention_2"
+    
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_path,
         **model_kwargs
@@ -82,11 +93,19 @@ def create_interface():
     )
     return interface
 
+def print_gpu_info():
+    num_gpus = torch.cuda.device_count()
+    print(f"\nNumber of available GPUs: {num_gpus}")
+    for i in range(num_gpus):
+        gpu = torch.cuda.get_device_properties(i)
+        print(f"GPU {i}: {gpu.name} ({gpu.total_memory / 1024**3:.1f} GB)")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Qwen2-VL model with optional Flash Attention 2")
     parser.add_argument("--flash-attn2", action="store_true", help="Use Flash Attention 2")
     args = parser.parse_args()
     
+    print_gpu_info()
     model = load_model(use_flash_attention=args.flash_attn2)
     interface = create_interface()
     interface.launch(share=True)
