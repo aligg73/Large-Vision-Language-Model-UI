@@ -24,12 +24,15 @@ def load_model(use_flash_attention=False):
         
         device_map = {
             # Vision components always on first GPU
+            "visual": 0,
             "vision_model": 0,
             "vision_projection": 0,
             "model.embed_tokens": 0,
+            "perceiver": 0,
+            "image_processor": 0,
         }
         
-        # Distribute layers across GPUs
+        # Distribute language model layers across GPUs
         current_layer = 0
         for gpu_id in range(num_gpus):
             # Add extra layer to early GPUs if division wasn't even
@@ -47,6 +50,11 @@ def load_model(use_flash_attention=False):
             "model.norm": num_gpus - 1,
             "lm_head": num_gpus - 1
         })
+        
+        # Ensure all visual components are on GPU 0
+        for i in range(32):  # Typical number of visual blocks
+            device_map[f"visual.blocks.{i}"] = 0
+            device_map[f"visual.norm.{i}"] = 0
     
     model_kwargs = {
         "torch_dtype": torch.float16,
