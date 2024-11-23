@@ -26,7 +26,7 @@ def load_model(use_flash_attention=False):
             # Vision components always on first GPU
             "vision_model": 0,
             "vision_projection": 0,
-            "language_model.embed_tokens": 0,
+            "model.embed_tokens": 0,
         }
         
         # Distribute layers across GPUs
@@ -38,13 +38,13 @@ def load_model(use_flash_attention=False):
             
             # Assign this GPU's layers
             for i in range(current_layer, current_layer + gpu_layers):
-                device_map[f"language_model.layers.{i}"] = gpu_id
+                device_map[f"model.layers.{i}"] = gpu_id
             
             current_layer += gpu_layers
         
         # Put final layers on last GPU
         device_map.update({
-            "language_model.norm": num_gpus - 1,
+            "model.norm": num_gpus - 1,
             "lm_head": num_gpus - 1
         })
     
