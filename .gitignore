@@ -1,3 +1,7 @@
 qwen_venv/
 __pycache__/
 *.pyc
+.gradio/
+*.swp
+model/
+model72b/
