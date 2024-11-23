@@ -1,5 +1,5 @@
 import gradio as gr
-from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, AutoConfig
 from qwen_vl_utils import process_vision_info
 import torch
 import argparse
@@ -9,22 +9,56 @@ import os
 model_path = os.environ.get("QWEN_MODEL_PATH", "path/to/model")
 
 def load_model(use_flash_attention=False):
-    # Get number of available GPUs
     num_gpus = torch.cuda.device_count()
     
+    # Load config first to get number of layers
+    config = AutoConfig.from_pretrained(model_path)
+    total_layers = config.num_hidden_layers
+    
     if num_gpus <= 1:
-        device_map = "auto"
+        device_map = {"": 0}  # Force everything to GPU 0
     else:
-        # Create a device map that spreads across all available GPUs
-        device_map = "balanced_low_0"
+        # Calculate layers per GPU based on actual model architecture
+        layers_per_gpu = total_layers // num_gpus
+        remaining_layers = total_layers % num_gpus
+        
+        device_map = {
+            # Vision components always on first GPU
+            "vision_model": 0,
+            "vision_projection": 0,
+            "language_model.embed_tokens": 0,
+        }
+        
+        # Distribute layers across GPUs
+        current_layer = 0
+        for gpu_id in range(num_gpus):
+            # Add extra layer to early GPUs if division wasn't even
+            extra_layer = 1 if gpu_id < remaining_layers else 0
+            gpu_layers = layers_per_gpu + extra_layer
+            
+            # Assign this GPU's layers
+            for i in range(current_layer, current_layer + gpu_layers):
+                device_map[f"language_model.layers.{i}"] = gpu_id
+            
+            current_layer += gpu_layers
+        
+        # Put final layers on last GPU
+        device_map.update({
+            "language_model.norm": num_gpus - 1,
+            "lm_head": num_gpus - 1
+        })
     
     model_kwargs = {
-        "torch_dtype": torch.float16,  # Use float16 for AWQ compatibility
+        "torch_dtype": torch.float16,
         "device_map": device_map,
     }
     
     if use_flash_attention:
         model_kwargs["attn_implementation"] = "flash_attention_2"
+    
+    print("\nDevice Map:")
+    for key, value in device_map.items():
+        print(f"{key}: GPU {value}")
     
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_path,
