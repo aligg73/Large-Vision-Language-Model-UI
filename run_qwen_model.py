@@ -18,24 +18,27 @@ def load_model(use_flash_attention=False):
     if num_gpus <= 1:
         device_map = {"": 0}
     else:
-        # Calculate layers per GPU, accounting for visual components
-        # Visual components roughly equal ~10 layers in memory usage
-        adjusted_total = total_layers + 10
-        layers_per_gpu = adjusted_total // num_gpus
-        remaining_layers = total_layers % num_gpus
-        
-        device_map = {}
-        
-        # Distribute visual components across GPUs 0 and 1
-        device_map.update({
-            "vision_model": 1,  # Move to GPU 1
+        device_map = {
+            # Vision components on GPU 1
+            "vision_model": 1,
             "vision_projection": 1,
             "model.embed_tokens": 0,
             "perceiver": 1,
             "image_processor": 1,
             "rotary_emb": 0,
             "model.rotary_emb": 0,
-        })
+            
+            # Visual merger components
+            "visual.merger": 1,
+            "visual.merger.ln_q": 1,
+            "visual.merger.ln_k": 1,
+            "visual.merger.ln_v": 1,
+            "visual.merger.ln_out": 1,
+            "visual.merger.q_proj": 1,
+            "visual.merger.k_proj": 1,
+            "visual.merger.v_proj": 1,
+            "visual.merger.out_proj": 1,
+        }
         
         # Distribute visual blocks between GPU 0 and 1
         for i in range(32):
@@ -46,7 +49,7 @@ def load_model(use_flash_attention=False):
                 device_map[f"visual.blocks.{i}"] = 1
                 device_map[f"visual.norm.{i}"] = 1
         
-        # Distribute language model layers more evenly
+        # Distribute language model layers
         layers_gpu0 = total_layers // 3  # Fewer layers on GPU 0 due to visual components
         layers_gpu1 = (total_layers - layers_gpu0) // 2
         layers_gpu2 = total_layers - layers_gpu0 - layers_gpu1
@@ -78,20 +81,17 @@ def load_model(use_flash_attention=False):
         })
     
     model_kwargs = {
-        "torch_dtype": torch.float16,  # Use FP16
+        "torch_dtype": torch.float16,
         "device_map": device_map,
-        "low_cpu_mem_usage": True,     # Reduce CPU memory usage
+        "low_cpu_mem_usage": True,
     }
     
     if use_flash_attention:
         model_kwargs["attn_implementation"] = "flash_attention_2"
     
-    # Set PyTorch memory allocator settings
-    torch.cuda.set_per_process_memory_fraction(0.95)  # Leave some headroom
-    torch.cuda.empty_cache()  # Clear cache before loading
-    
     # Configure PyTorch's CUDA allocator
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512,expandable_segments:True"
+    torch.cuda.empty_cache()
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:True"
     
     print("\nDevice Map:")
     for key, value in device_map.items():
