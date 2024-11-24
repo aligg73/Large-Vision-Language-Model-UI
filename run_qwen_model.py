@@ -28,6 +28,10 @@ def load_model(use_flash_attention=False):
             "rotary_emb": 0,
             "model.rotary_emb": 0,
             
+            # Visual patch embedding
+            "visual.patch_embed": 1,
+            "visual.patch_embed.proj": 1,
+            
             # Visual merger components
             "visual.merger": 1,
             "visual.merger.ln_q": 1,
@@ -38,6 +42,12 @@ def load_model(use_flash_attention=False):
             "visual.merger.k_proj": 1,
             "visual.merger.v_proj": 1,
             "visual.merger.out_proj": 1,
+            
+            # Additional visual components
+            "visual.pos_embed": 1,
+            "visual.cls_token": 1,
+            "visual.ln_pre": 1,
+            "visual.ln_post": 1,
         }
         
         # Distribute visual blocks between GPU 0 and 1
