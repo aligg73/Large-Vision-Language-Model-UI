@@ -85,6 +85,7 @@ def process_input(image, video, prompt, temperature=0.8, top_k=50, top_p=0.9, ma
         media = video
     else:
         return "Please upload an image or video."
+    
     messages = [
         {
             "role": "user",
@@ -97,6 +98,11 @@ def process_input(image, video, prompt, temperature=0.8, top_k=50, top_p=0.9, ma
     
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(messages)
+    
+    # Get the device of the first model parameter
+    device = next(model.parameters()).device
+    
+    # Process inputs and move to the correct device
     inputs = processor(
         text=[text],
         images=image_inputs,
@@ -104,7 +110,10 @@ def process_input(image, video, prompt, temperature=0.8, top_k=50, top_p=0.9, ma
         padding=True,
         return_tensors="pt"
     )
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    
+    # Move all inputs to the same device as the model
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    
     outputs = model.generate(
         **inputs,
         max_new_tokens=max_tokens,
