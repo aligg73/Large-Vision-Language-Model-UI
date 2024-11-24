@@ -30,6 +30,8 @@ def load_model(use_flash_attention=False):
             "model.embed_tokens": 0,
             "perceiver": 0,
             "image_processor": 0,
+            "rotary_emb": 0,  # Add rotary embeddings
+            "model.rotary_emb": 0,  # Add model's rotary embeddings
         }
         
         # Distribute language model layers across GPUs
@@ -42,6 +44,8 @@ def load_model(use_flash_attention=False):
             # Assign this GPU's layers
             for i in range(current_layer, current_layer + gpu_layers):
                 device_map[f"model.layers.{i}"] = gpu_id
+                # Add rotary embeddings for each layer
+                device_map[f"model.layers.{i}.self_attn.rotary_emb"] = gpu_id
             
             current_layer += gpu_layers
         
@@ -72,6 +76,11 @@ def load_model(use_flash_attention=False):
         model_path,
         **model_kwargs
     )
+    
+    # Ensure rotary embeddings are on the correct device
+    if hasattr(model, 'rotary_emb'):
+        model.rotary_emb = model.rotary_emb.to(device_map.get('rotary_emb', 0))
+    
     return model
 
 processor = AutoProcessor.from_pretrained(model_path)
