@@ -18,46 +18,64 @@ def load_model(use_flash_attention=False):
     if num_gpus <= 1:
         device_map = {"": 0}
     else:
-        # More aggressive layer distribution across GPUs
-        layers_per_gpu = total_layers // num_gpus
+        # Calculate layers per GPU, accounting for visual components
+        # Visual components roughly equal ~10 layers in memory usage
+        adjusted_total = total_layers + 10
+        layers_per_gpu = adjusted_total // num_gpus
         remaining_layers = total_layers % num_gpus
         
-        device_map = {
-            # Vision components on GPU 0
-            "visual": 0,
-            "vision_model": 0,
-            "vision_projection": 0,
+        device_map = {}
+        
+        # Distribute visual components across GPUs 0 and 1
+        device_map.update({
+            "vision_model": 1,  # Move to GPU 1
+            "vision_projection": 1,
             "model.embed_tokens": 0,
-            "perceiver": 0,
-            "image_processor": 0,
+            "perceiver": 1,
+            "image_processor": 1,
             "rotary_emb": 0,
             "model.rotary_emb": 0,
-        }
+        })
         
-        # Distribute layers more evenly
+        # Distribute visual blocks between GPU 0 and 1
+        for i in range(32):
+            if i < 16:  # First half of visual blocks to GPU 0
+                device_map[f"visual.blocks.{i}"] = 0
+                device_map[f"visual.norm.{i}"] = 0
+            else:  # Second half to GPU 1
+                device_map[f"visual.blocks.{i}"] = 1
+                device_map[f"visual.norm.{i}"] = 1
+        
+        # Distribute language model layers more evenly
+        layers_gpu0 = total_layers // 3  # Fewer layers on GPU 0 due to visual components
+        layers_gpu1 = (total_layers - layers_gpu0) // 2
+        layers_gpu2 = total_layers - layers_gpu0 - layers_gpu1
+        
         current_layer = 0
-        for gpu_id in range(num_gpus):
-            # Add extra layer to early GPUs if division wasn't even
-            extra_layer = 1 if gpu_id < remaining_layers else 0
-            gpu_layers = layers_per_gpu + extra_layer
-            
-            # Assign this GPU's layers
-            for i in range(current_layer, current_layer + gpu_layers):
-                device_map[f"model.layers.{i}"] = gpu_id
-                device_map[f"model.layers.{i}.self_attn.rotary_emb"] = gpu_id
-            
-            current_layer += gpu_layers
+        
+        # GPU 0 layers
+        for i in range(layers_gpu0):
+            device_map[f"model.layers.{current_layer}"] = 0
+            device_map[f"model.layers.{current_layer}.self_attn.rotary_emb"] = 0
+            current_layer += 1
+        
+        # GPU 1 layers
+        for i in range(layers_gpu1):
+            device_map[f"model.layers.{current_layer}"] = 1
+            device_map[f"model.layers.{current_layer}.self_attn.rotary_emb"] = 1
+            current_layer += 1
+        
+        # GPU 2 layers
+        for i in range(layers_gpu2):
+            device_map[f"model.layers.{current_layer}"] = 2
+            device_map[f"model.layers.{current_layer}.self_attn.rotary_emb"] = 2
+            current_layer += 1
         
         # Final layers on last GPU
         device_map.update({
-            "model.norm": num_gpus - 1,
-            "lm_head": num_gpus - 1
+            "model.norm": 2,
+            "lm_head": 2
         })
-        
-        # Visual blocks on first GPU
-        for i in range(32):
-            device_map[f"visual.blocks.{i}"] = 0
-            device_map[f"visual.norm.{i}"] = 0
     
     model_kwargs = {
         "torch_dtype": torch.float16,  # Use FP16
