@@ -16,25 +16,25 @@ def load_model(use_flash_attention=False):
     total_layers = config.num_hidden_layers
     
     if num_gpus <= 1:
-        device_map = {"": 0}  # Force everything to GPU 0
+        device_map = {"": 0}
     else:
-        # Calculate layers per GPU based on actual model architecture
+        # More aggressive layer distribution across GPUs
         layers_per_gpu = total_layers // num_gpus
         remaining_layers = total_layers % num_gpus
         
         device_map = {
-            # Vision components always on first GPU
+            # Vision components on GPU 0
             "visual": 0,
             "vision_model": 0,
             "vision_projection": 0,
             "model.embed_tokens": 0,
             "perceiver": 0,
             "image_processor": 0,
-            "rotary_emb": 0,  # Add rotary embeddings
-            "model.rotary_emb": 0,  # Add model's rotary embeddings
+            "rotary_emb": 0,
+            "model.rotary_emb": 0,
         }
         
-        # Distribute language model layers across GPUs
+        # Distribute layers more evenly
         current_layer = 0
         for gpu_id in range(num_gpus):
             # Add extra layer to early GPUs if division wasn't even
@@ -44,29 +44,36 @@ def load_model(use_flash_attention=False):
             # Assign this GPU's layers
             for i in range(current_layer, current_layer + gpu_layers):
                 device_map[f"model.layers.{i}"] = gpu_id
-                # Add rotary embeddings for each layer
                 device_map[f"model.layers.{i}.self_attn.rotary_emb"] = gpu_id
             
             current_layer += gpu_layers
         
-        # Put final layers on last GPU
+        # Final layers on last GPU
         device_map.update({
             "model.norm": num_gpus - 1,
             "lm_head": num_gpus - 1
         })
         
-        # Ensure all visual components are on GPU 0
-        for i in range(32):  # Typical number of visual blocks
+        # Visual blocks on first GPU
+        for i in range(32):
             device_map[f"visual.blocks.{i}"] = 0
             device_map[f"visual.norm.{i}"] = 0
     
     model_kwargs = {
-        "torch_dtype": torch.float16,
+        "torch_dtype": torch.float16,  # Use FP16
         "device_map": device_map,
+        "low_cpu_mem_usage": True,     # Reduce CPU memory usage
     }
     
     if use_flash_attention:
         model_kwargs["attn_implementation"] = "flash_attention_2"
+    
+    # Set PyTorch memory allocator settings
+    torch.cuda.set_per_process_memory_fraction(0.95)  # Leave some headroom
+    torch.cuda.empty_cache()  # Clear cache before loading
+    
+    # Configure PyTorch's CUDA allocator
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512,expandable_segments:True"
     
     print("\nDevice Map:")
     for key, value in device_map.items():
@@ -76,10 +83,6 @@ def load_model(use_flash_attention=False):
         model_path,
         **model_kwargs
     )
-    
-    # Ensure rotary embeddings are on the correct device
-    if hasattr(model, 'rotary_emb'):
-        model.rotary_emb = model.rotary_emb.to(device_map.get('rotary_emb', 0))
     
     return model
 
@@ -95,6 +98,9 @@ def process_input(image, video, prompt, temperature=0.8, top_k=50, top_p=0.9, ma
     else:
         return "Please upload an image or video."
     
+    # Clear cache before processing
+    torch.cuda.empty_cache()
+    
     messages = [
         {
             "role": "user",
@@ -108,28 +114,32 @@ def process_input(image, video, prompt, temperature=0.8, top_k=50, top_p=0.9, ma
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(messages)
     
-    # Get the device of the first model parameter
     device = next(model.parameters()).device
     
-    # Process inputs and move to the correct device
-    inputs = processor(
-        text=[text],
-        images=image_inputs,
-        videos=video_inputs,
-        padding=True,
-        return_tensors="pt"
-    )
+    with torch.cuda.amp.autocast():  # Use automatic mixed precision
+        inputs = processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt"
+        )
+        
+        # Move inputs to device and convert to float16
+        inputs = {k: v.to(device, dtype=torch.float16 if v.dtype == torch.float32 else v.dtype) 
+                 for k, v in inputs.items()}
+        
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            use_cache=True  # Enable KV cache
+        )
     
-    # Move all inputs to the same device as the model
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=max_tokens,
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p
-    )
+    # Clear cache after processing
+    torch.cuda.empty_cache()
     
     output_text = processor.batch_decode(outputs, skip_special_tokens=True)
     response = output_text[0].split("assistant\n")[-1].strip()
@@ -163,8 +173,10 @@ def print_gpu_info():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Qwen2-VL model with optional Flash Attention 2")
     parser.add_argument("--flash-attn2", action="store_true", help="Use Flash Attention 2")
+    parser.add_argument("--memory-fraction", type=float, default=0.95, help="Maximum CUDA memory fraction to use")
     args = parser.parse_args()
     
+    torch.cuda.set_per_process_memory_fraction(args.memory_fraction)
     print_gpu_info()
     model = load_model(use_flash_attention=args.flash_attn2)
     interface = create_interface()
